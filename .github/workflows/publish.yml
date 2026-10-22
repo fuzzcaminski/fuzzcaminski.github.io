@@ -57,7 +57,8 @@ jobs:
                   break
           entries = []
           for post in posts:
-              media = post.get('children', {}).get('data', []) if post.get('media_type') == 'CAROUSEL_ALBUM' else [post]
+              # Instagram's parent media URL is the post cover, including carousel image 1.
+              media = [post]
               for item in media:
                   url = item.get('thumbnail_url') if item.get('media_type') == 'VIDEO' else item.get('media_url')
                   if url:

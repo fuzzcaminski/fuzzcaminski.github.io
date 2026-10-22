@@ -57,15 +57,15 @@ jobs:
                   break
           entries = []
           for post in posts:
-              # Select the first child explicitly; the parent URL can be a different slide.
+              # Preserve every carousel slide in Instagram order.
               children = post.get('children', {}).get('data', [])
               if post.get('media_type') == 'CAROUSEL_ALBUM' and not children:
                   children = api(post['id'] + '/children', {'fields': 'id,media_type,media_url,thumbnail_url'}).get('data', [])
-              media = children[:1] if children else [post]
+              media = children if children else [post]
               for item in media:
                   url = item.get('thumbnail_url') if item.get('media_type') == 'VIDEO' else item.get('media_url')
                   if url:
-                      entries.append({'id': item['id'], 'url': url, 'caption': post.get('caption', ''), 'permalink': post.get('permalink', ''), 'timestamp': post.get('timestamp', '')})
+                      entries.append({'post_id': post['id'], 'id': item['id'], 'url': url, 'caption': post.get('caption', ''), 'permalink': post.get('permalink', ''), 'timestamp': post.get('timestamp', '')})
           if not entries:
               sys.exit('Instagram returned no media; leaving the last successful deployment intact.')
           Path('public/photos').mkdir(parents=True, exist_ok=True)
@@ -84,12 +84,19 @@ jobs:
                       Path('public', filename).write_bytes(response.read())
               except Exception:
                   raise RuntimeError('An image download failed; keeping the previous deployment.') from None
-              return {'src': filename, 'caption': entry['caption'], 'permalink': entry['permalink'], 'timestamp': entry['timestamp']}
+              return {'post_id': entry['post_id'], 'src': filename, 'caption': entry['caption'], 'permalink': entry['permalink'], 'timestamp': entry['timestamp']}
           try:
               with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
                   photos = list(pool.map(download, entries))
           except RuntimeError as error:
               sys.exit(str(error))
+          grouped = {}
+          for photo in photos:
+              post_id = photo.pop('post_id')
+              if post_id not in grouped:
+                  grouped[post_id] = {**photo, 'images': []}
+              grouped[post_id]['images'].append({'src': photo['src']})
+          photos = list(grouped.values())
           Path('public/photos.json').write_text(json.dumps({'photos': photos}, ensure_ascii=False), encoding='utf-8')
           print('Prepared', len(photos), 'photographs from', len(posts), 'Instagram posts.')
           PY

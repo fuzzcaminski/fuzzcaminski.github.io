@@ -1,0 +1,98 @@
+name: Publish portfolio and Instagram gallery
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 5 * * *'
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare website and fetch Instagram photographs
+        env:
+          INSTAGRAM_TOKEN: ${{ secrets.INSTAGRAM_TOKEN }}
+        run: |
+          mkdir -p public
+          cp index.html photography.html public/
+          python3 - <<'PY'
+          import json, os, sys, urllib.request, urllib.parse, concurrent.futures
+          from pathlib import Path
+          token = os.environ.get('INSTAGRAM_TOKEN', '')
+          if not token:
+              sys.exit('Add the INSTAGRAM_TOKEN repository secret before publishing.')
+          root = 'https://graph.instagram.com/v24.0/'
+          def api(path, params):
+              url = root + path + '?' + urllib.parse.urlencode(params)
+              request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + token})
+              try:
+                  with urllib.request.urlopen(request, timeout=60) as response:
+                      return json.load(response)
+              except Exception:
+                  raise RuntimeError('Instagram request failed. Check the token and permissions.') from None
+          fields = 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,children{id,media_type,media_url,thumbnail_url}'
+          posts, after = [], None
+          while True:
+              params = {'fields': fields, 'limit': 100}
+              if after:
+                  params['after'] = after
+              page = api('17841444913276420/media', params)
+              posts.extend(page.get('data', []))
+              paging = page.get('paging', {})
+              after = paging.get('cursors', {}).get('after') if paging.get('next') else None
+              if not after:
+                  break
+          entries = []
+          for post in posts:
+              media = post.get('children', {}).get('data', []) if post.get('media_type') == 'CAROUSEL_ALBUM' else [post]
+              for item in media:
+                  url = item.get('thumbnail_url') if item.get('media_type') == 'VIDEO' else item.get('media_url')
+                  if url:
+                      entries.append({'id': item['id'], 'url': url, 'caption': post.get('caption', ''), 'permalink': post.get('permalink', ''), 'timestamp': post.get('timestamp', '')})
+          if not entries:
+              sys.exit('Instagram returned no media; leaving the last successful deployment intact.')
+          Path('public/photos').mkdir(parents=True, exist_ok=True)
+          def download(entry):
+              url = urllib.parse.urlparse(entry['url'])
+              host = url.hostname or ''
+              if url.scheme != 'https' or not (host.endswith('.cdninstagram.com') or host.endswith('.fbcdn.net')):
+                  raise RuntimeError('Unexpected image host; download stopped.')
+              try:
+                  with urllib.request.urlopen(entry['url'], timeout=90) as response:
+                      content_type = response.headers.get('Content-Type', '').split(';')[0]
+                      extensions = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp'}
+                      if content_type not in extensions:
+                          raise RuntimeError()
+                      filename = 'photos/' + entry['id'] + extensions[content_type]
+                      Path('public', filename).write_bytes(response.read())
+              except Exception:
+                  raise RuntimeError('An image download failed; keeping the previous deployment.') from None
+              return {'src': filename, 'caption': entry['caption'], 'permalink': entry['permalink'], 'timestamp': entry['timestamp']}
+          try:
+              with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                  photos = list(pool.map(download, entries))
+          except RuntimeError as error:
+              sys.exit(str(error))
+          Path('public/photos.json').write_text(json.dumps({'photos': photos}, ensure_ascii=False), encoding='utf-8')
+          print('Prepared', len(photos), 'photographs from', len(posts), 'Instagram posts.')
+          PY
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - name: Deploy website
+        id: deployment
+        uses: actions/deploy-pages@v4
